@@ -1,0 +1,196 @@
+load_file("nrngui.hoc")
+cvode_active(1)
+
+objref g,p,k,vbox,stim,syn,nc,si,param,apct, apco
+
+Dtaper=1		// setting the initial morphological parameters
+Ddend=1	
+lc=1		
+Dtrunk=1
+
+ed=0.3  	// synapse position in the oblique
+ed1=0.15 	// recording position in the trunk
+weight=.3	// starting synaptic strenght
+delta=.05   // increase in synaptic strenght on each simulation
+ns=100 		// nseg for each compartment
+
+param = new File()
+
+RmDend = 28000
+CmDend = 1
+RaAll= 150
+Vrest = -65
+dt = 0.1
+gna =0.025
+gkdr =0.01
+celsius = 35.0  
+KMULT =0.03
+KMULTP =0.03
+ghd =0.00005
+
+tstop = 20
+
+create dend[3]						// creates 3 dendrites 	
+connect dend[1](0), dend[0](0.5)	// connecting the trunk with the branch point 
+connect dend[2](0), dend[1](1)		// connecting the branch point with the oblique dendrite
+
+dend[0] {nseg = ns diam=1 L = 240	insert pas e_pas=Vrest g_pas = 1/RmDend Ra=RaAll cm=CmDend}
+dend[1] {nseg = ns diam=1 L = lc	insert pas e_pas=Vrest g_pas = 1/RmDend Ra=RaAll cm=CmDend}
+dend[2] {nseg = ns diam=1 L = 120	insert pas e_pas=Vrest g_pas = 1/RmDend Ra=RaAll cm=CmDend}
+
+g = new Graph()                                   // vtrunk graph
+g.size(0,tstop,-70,30)
+g.addvar("dend[0].v(ed1)",1,1,tstop,0,2)
+g.label(0.75,0.75,"time (ms)")
+g.label(0,0.95,"vtrunk (mV)")
+
+p = new PlotShape() 							//Shape plot
+p.exec_menu("Shape Plot")
+p.variable("v")
+p.show(0)
+p.label(0.6,0.7,"Regular branches")
+
+k = new Graph()                                   // Fig. 6, inset
+k.size(0.1,0.4,0,20)
+k.label(0.15,0.7,"AP")
+k.label(0.15,0.25,"d-spike",2, 1, 0.1, 0.1, 9)
+k.label(0.05,0.95,"threshold (nS)")
+k.label(0.7,0.15,"d_dend/d_trunk")
+// k.label(0.7,0.95,"FIG. 1E, inset")
+
+access dend[0]
+distance()
+
+forsec "dend" {                                       //Ion channels
+				insert hd ghdbar_hd=ghd
+                insert na3 gbar_na3=gna 
+                insert kdr gkdrbar_kdr=gkdr
+				insert kap gkabar_kap=0
+				insert kad gkabar_kad=0
+
+		for (x,0) { xdist = distance(x)
+                	ghdbar_hd(x) = ghd*(1+3*xdist/100)
+                		if (xdist > 100){
+								vhalfl_hd=-81
+                        		gkabar_kad(x) = KMULT*(1+xdist/100)
+                			} else {
+								vhalfl_hd=-73
+                        		gkabar_kap(x) = KMULTP*(1+xdist/100)
+               				}
+		}		
+}
+
+proc init() {
+
+	t=0
+        forall {
+		insert ds
+        v=Vrest
+        if (ismembrane("nax") || ismembrane("na3")) {ena=55}
+        if (ismembrane("kdr") || ismembrane("kap") || ismembrane("kad")) {ek=-90}
+        if (ismembrane("hd") ) {ehd_hd=-30}
+		
+		for (x,0) { xdist = distance(x)
+                		if (xdist > 100){
+								vhalfl_hd=-81
+                        		gkabar_kad(x) = KMULT*(1+xdist/100)
+                			} else {
+								vhalfl_hd=-73
+                        		gkabar_kap(x) = KMULTP*(1+xdist/100)
+               				}
+		}
+	}
+	finitialize(Vrest)
+        fcurrent()
+
+        forall {
+			for (x) {
+				if (ismembrane("na3")||ismembrane("nax")){e_pas(x)=v(x)+(ina(x)+ik(x))/g_pas(x)}
+				if (ismembrane("hd")) {e_pas(x)=e_pas(x)+i_hd(x)/g_pas(x)}
+				}
+		}
+		
+	cvode.re_init()
+	cvode.event(tstop)
+	g.begin()
+}
+
+proc advance() {
+	fadvance()
+	g.plot(t)
+	g.flush()
+	p.flush()
+	k.flush()
+	doNotify()
+	}
+
+forsec "dend[2]"{                                      
+		objectvar syn                                        // putting a synapse in the oblique
+		syn = new Exp2Syn(ed)
+		syn.e=0
+		syn.tau1 = 0.5
+		syn.tau2 = 3
+		si= new NetStimm(ed)
+		si.interval=0
+		si.number = 1
+		si.start=1
+		si.noise=0
+		}
+				
+		param.ropen("morph.txt")					//opens the file with the branch morphological parameters
+proc run_simulation() {
+		while(!param.eof()){
+			branch=branch+1
+
+			Ddend=	param.scanvar()
+			lc=		param.scanvar()
+			Dtaper=	param.scanvar()
+			Dtrunk=	param.scanvar()
+
+			dend[0] {diam(0:1)=Dtrunk:Dtrunk}
+			dend[1] {diam(0:1)=Dtaper:Ddend L = lc}
+			dend[2] {diam(0:1)=Ddend:Ddend}
+
+			define_shape()
+
+			dend[0] apct = new APCount(ed1)			//AP count in the trunk
+			apct.thresh=-20
+
+			dend[2] apco = new APCount(ed)          //AP count in the oblique
+			apco.thresh=-40
+
+			dend[2] syn.loc(ed)
+			
+			a=0
+			
+			while(weight<20 && apct.n<1){			// increases the syn weight until 20 nS or until there is an AP
+
+				weight=weight+delta
+				nc = new NetCon(si,syn,0,0,weight*1.e-3)
+
+				run()
+
+				if (apco.n > 0){
+					a=a+1
+						if (a==1){ 
+							loc=weight
+							delta=.25
+							k.mark(Ddend/Dtrunk, loc, "o",4,9,4)
+						 }
+				}
+
+				if (apct.n > 0){
+				print "branch",branch,"; d_dend/d_trunk",Ddend/Dtrunk,"; dspike(nS) ",loc,"; AP(nS) ",weight   
+				k.mark(Ddend/Dtrunk, weight, "o",7,1,2)
+				}
+			}
+			weight=.15
+			if(apct.n<1){
+			print branch, ";", Ddend/Dtrunk, ";", loc, ";", "noAP"
+			}
+		}
+}
+
+xpanel("Run simulation")
+  xbutton("Run simulation (takes 2 1/2 hours)","run_simulation()")
+xpanel()
